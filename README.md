@@ -4,6 +4,7 @@
 
 仓库结构（计划中）：
 
+```
 word2vec_project/
 ├── README.md              # 项目说明、运行方式、结果总结
 ├── data/
@@ -20,3 +21,4 @@ word2vec_project/
 │   ├── tsne_visualization.png
 │   └── evaluation_results.txt
 └── requirements.txt
+```
