@@ -11,6 +11,9 @@ if __name__ == "__main__":
     vocabs = vocab.Vocabulary(min_count = 5).build(corpus)
     training_pairs = skipgram.generate_training_pairs(corpus, vocabs.word2idx, window_size=5)
 
+    print(f"总训练样本数: {len(training_pairs)}")
+    print(f"词汇表大小: {vocabs.vocab_size}")
+
     for i in range(100):
         center_idx, context_idx = training_pairs[i]
         center_word = vocabs.idx2word[center_idx]

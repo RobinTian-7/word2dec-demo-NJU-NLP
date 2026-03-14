@@ -82,8 +82,8 @@ def generate_training_pairs(corpus, word2index, window_size=5):
 ### Step 1.4 Skip-Gram 基础版 — Full Softmax（3-4h）
 
 **做什么：**
-- 实现两个嵌入矩阵：W_center (V×D), W_context (V×D)
-- 前向传播：center_vec → 与所有 context_vec 做点积 → softmax → 交叉熵损失
+- 实现两个嵌入矩阵：$W_{center} (V×D), W_{context} (V×D)$
+- 前向传播：$center_{vec}$ → 与所有 $context_{vec}$ 做点积 → softmax → 交叉熵损失
 - 反向传播：手推梯度，更新两个矩阵
 - 用 SGD 优化
 
@@ -341,6 +341,206 @@ model = Word2Vec(sentences, vector_size=100, window=5,
 - 标注学习率变化（如果有衰减）
 - 保存为 training_loss.png
 
+### Step 3.5b GloVe 实现与可视化对比（3-4h）⭐ 扩展项
+
+**为什么值得做：** GloVe 和 Word2Vec 是两种主流词向量方法，并排可视化后对比，是 paper 里最有说服力的图之一。
+
+#### 3.5b-1 理解 GloVe（0.5h，先读再写）
+
+GloVe 的核心思路：不是逐样本预测，而是直接拟合词共现矩阵的对数。
+
+**目标函数：**
+```
+J = Σ_{i,j} f(X_{ij}) * (W_i · W̃_j + b_i + b̃_j - log X_{ij})²
+
+其中：
+  X_{ij}     = 词 i 和词 j 在窗口内共现的次数
+  f(x)       = min(1, (x/x_max)^α)   权重函数，α=0.75, x_max=100
+  W_i, W̃_j  = 中心词向量 / 上下文词向量
+  b_i, b̃_j  = 偏置项
+
+最终词向量 = W + W̃（两者相加）
+```
+
+**与 Word2Vec 的本质区别：**
+- Word2Vec：局部上下文窗口，逐样本训练（在线学习）
+- GloVe：全局共现统计，先统计后优化（批量学习）
+
+**产出检查点：**
+- [ ] 能用自己的话解释 f(x) 的作用（压制超高频共现的权重）
+- [ ] 理解为什么最终要把 W 和 W̃ 相加而不只用一个
+
+#### 3.5b-2 构建共现矩阵（1h）
+
+```python
+from collections import defaultdict
+import numpy as np
+import scipy.sparse as sp
+
+def build_cooccurrence_matrix(corpus, word2index, window_size=5):
+    """
+    corpus: List[List[str]]，已分词的句子列表
+    返回稀疏共现矩阵 X，shape=(vocab_size, vocab_size)
+    """
+    vocab_size = len(word2index)
+    cooc = defaultdict(float)
+
+    for sentence in corpus:
+        ids = [word2index[w] for w in sentence if w in word2index]
+        for i, center in enumerate(ids):
+            for offset in range(1, window_size + 1):
+                # 距离越远权重越小（1/distance 加权）
+                if i + offset < len(ids):
+                    cooc[(center, ids[i + offset])] += 1.0 / offset
+                    cooc[(ids[i + offset], center)] += 1.0 / offset
+
+    row, col, data = [], [], []
+    for (i, j), v in cooc.items():
+        row.append(i); col.append(j); data.append(v)
+
+    return sp.csr_matrix((data, (row, col)), shape=(vocab_size, vocab_size))
+```
+
+**产出检查点：**
+- [ ] 矩阵非零元素数量合理（通常是词表大小的几十倍）
+- [ ] 验证对称性：X[i,j] ≈ X[j,i]（因为共现是对称的）
+- [ ] 打印 ("国王", "皇帝") 的共现次数，确认非零
+
+#### 3.5b-3 实现 GloVe 模型（1.5h）
+
+```python
+class GloVe:
+    def __init__(self, vocab_size, embedding_dim, x_max=100, alpha=0.75):
+        # 中心词向量 W 和上下文向量 W_tilde
+        self.W       = np.random.uniform(-0.5, 0.5, (vocab_size, embedding_dim)) / embedding_dim
+        self.W_tilde = np.random.uniform(-0.5, 0.5, (vocab_size, embedding_dim)) / embedding_dim
+        self.b       = np.zeros(vocab_size)
+        self.b_tilde = np.zeros(vocab_size)
+
+        # AdaGrad 累积梯度平方
+        self.grad_sq_W       = np.ones_like(self.W)
+        self.grad_sq_W_tilde = np.ones_like(self.W_tilde)
+        self.grad_sq_b       = np.ones_like(self.b)
+        self.grad_sq_b_tilde = np.ones_like(self.b_tilde)
+
+        self.x_max = x_max
+        self.alpha = alpha
+
+    def weighting_func(self, x):
+        return np.minimum(1.0, (x / self.x_max) ** self.alpha)
+
+    def train_epoch(self, cooc_matrix, lr=0.05):
+        """对共现矩阵的所有非零元素做一轮更新"""
+        cx = cooc_matrix.tocoo()  # 转 COO 格式方便遍历
+        total_loss = 0.0
+
+        for i, j, x_ij in zip(cx.row, cx.col, cx.data):
+            w_f = self.weighting_func(x_ij)
+            log_x = np.log(x_ij)
+
+            # 残差
+            diff = np.dot(self.W[i], self.W_tilde[j]) + self.b[i] + self.b_tilde[j] - log_x
+            total_loss += 0.5 * w_f * diff ** 2
+
+            # 梯度
+            grad_W       = w_f * diff * self.W_tilde[j]
+            grad_W_tilde = w_f * diff * self.W[i]
+            grad_b       = w_f * diff
+            grad_b_tilde = w_f * diff
+
+            # AdaGrad 更新
+            self.W[i]       -= lr * grad_W       / np.sqrt(self.grad_sq_W[i])
+            self.W_tilde[j] -= lr * grad_W_tilde / np.sqrt(self.grad_sq_W_tilde[j])
+            self.b[i]       -= lr * grad_b       / np.sqrt(self.grad_sq_b[i])
+            self.b_tilde[j] -= lr * grad_b_tilde / np.sqrt(self.grad_sq_b_tilde[j])
+
+            # 累积梯度平方
+            self.grad_sq_W[i]       += grad_W ** 2
+            self.grad_sq_W_tilde[j] += grad_W_tilde ** 2
+            self.grad_sq_b[i]       += grad_b ** 2
+            self.grad_sq_b_tilde[j] += grad_b_tilde ** 2
+
+        return total_loss
+
+    def get_embeddings(self):
+        """论文建议：最终向量 = W + W̃"""
+        return self.W + self.W_tilde
+```
+
+**产出检查点：**
+- [ ] 训练 10 epoch，loss 稳定下降
+- [ ] `get_embeddings()` 返回 shape=(vocab_size, embedding_dim)
+- [ ] 用 `most_similar` 测试几个词，结果有语义合理性
+
+#### 3.5b-4 GloVe vs Word2Vec 并排可视化（0.5h）
+
+```python
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from sklearn.manifold import TSNE
+
+def plot_glove_vs_word2vec(glove_W, word2vec_W, words, word2index,
+                            save_path="results/glove_vs_word2vec_tsne.png"):
+    """
+    并排展示 GloVe 和 Word2Vec 的 t-SNE 可视化。
+    words: 要展示的词列表（建议按语义分组，方便看聚类差异）
+    """
+    ids  = [word2index[w] for w in words if w in word2index]
+    vecs_glove   = glove_W[ids]
+    vecs_w2v     = word2vec_W[ids]
+    labels       = [w for w in words if w in word2index]
+
+    # t-SNE 降维
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42, n_iter=1000)
+    pts_glove = tsne.fit_transform(vecs_glove)
+    pts_w2v   = tsne.fit_transform(vecs_w2v)
+
+    fig = plt.figure(figsize=(18, 8))
+    gs  = gridspec.GridSpec(1, 2, figure=fig)
+
+    for ax, pts, title in [
+        (fig.add_subplot(gs[0]), pts_glove, "GloVe"),
+        (fig.add_subplot(gs[1]), pts_w2v,   "Word2Vec (Skip-Gram + NS)"),
+    ]:
+        ax.scatter(pts[:, 0], pts[:, 1], alpha=0.6, s=20)
+        for label, (x, y) in zip(labels, pts):
+            ax.annotate(label, (x, y), fontsize=7, alpha=0.8)
+        ax.set_title(title, fontsize=14)
+        ax.axis("off")
+
+    plt.suptitle("t-SNE Visualization: GloVe vs Word2Vec", fontsize=16)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    print(f"图片已保存到 {save_path}")
+```
+
+**选词策略（让图更有说服力）：**
+- 挑 5-8 个语义组，每组 4-6 个词
+- 例如：数字（一二三四五）、时间（今天明天昨天）、动物、职业、情感词
+- 如果两个模型聚类方式不同，这就是你 paper 里最有价值的图
+
+**产出检查点：**
+- [ ] 图片清晰可读，有标题和词标注
+- [ ] 图片保存为 `results/glove_vs_word2vec_tsne.png`
+- [ ] 目视能看出两个模型的聚类差异（这是亮点，记录到 paper 里）
+
+#### 3.5b-5 定量对比表格（在 paper 里用）
+
+在 Step 3.7 的 paper 里加入这张表：
+
+| 模型 | 词相似度 Spearman ↑ | 类比准确率 ↑ | 训练时间 | 内存峰值 |
+|:---|:---:|:---:|:---:|:---:|
+| Word2Vec (Skip-Gram + NS) | ? | ? | ? | ? |
+| GloVe（自实现） | ? | ? | ? | ? |
+| Gensim Word2Vec | ? | ? | ? | ? |
+
+**产出检查点：**
+- [ ] 三行数字都填完
+- [ ] 有一句分析：哪个模型在哪类任务上更好，为什么
+
+---
+
 ### Step 3.6 代码整理与打包（1-1.5h）
 
 **做什么：**
@@ -353,14 +553,18 @@ word2vec_project/
 │   └── preprocess.py      # 数据加载与预处理
 ├── model/
 │   ├── skipgram.py        # Skip-Gram + Negative Sampling 实现
+│   ├── glove.py           # GloVe 实现（共现矩阵 + 训练）
 │   └── vocabulary.py      # 词表构建
-├── train.py               # 训练入口
-├── evaluate.py            # 评估（相似度、对比）
-├── visualize.py           # t-SNE 可视化
+├── train.py               # Word2Vec 训练入口
+├── train_glove.py         # GloVe 训练入口
+├── evaluate.py            # 评估（相似度、类比、对比表格）
+├── visualize.py           # t-SNE 可视化（单模型）
+├── visualize_compare.py   # GloVe vs Word2Vec 并排可视化
 ├── compare_gensim.py      # Gensim 对比
 ├── results/
 │   ├── training_loss.png
 │   ├── tsne_visualization.png
+│   ├── glove_vs_word2vec_tsne.png   # ⭐ GloVe 对比图
 │   └── evaluation_results.txt
 └── requirements.txt
 ```
@@ -389,10 +593,13 @@ word2vec_project/
 
 ## Day 3 结束时你应该有的东西：
 1. ✅ 词相似度评估结果
-2. ✅ t-SNE 可视化图
+2. ✅ Word2Vec t-SNE 可视化图
 3. ✅ Gensim 对比数据
 4. ✅ 超参数消融实验
-5. ✅ 整洁的代码仓库 + README
+5. ✅ GloVe 实现 + 训练完成（扩展项）
+6. ✅ GloVe vs Word2Vec 并排 t-SNE 可视化（扩展项）
+7. ✅ 三模型定量对比表（Word2Vec / GloVe / Gensim）
+8. ✅ 整洁的代码仓库 + README
 
 ---
 
