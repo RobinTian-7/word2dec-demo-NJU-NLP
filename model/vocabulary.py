@@ -29,7 +29,10 @@ class Vocabulary:
         return self
 
     def word_freq(self):
-        return dict(self._word_freq)
+        return {
+            word: self._word_freq[word]
+            for word in self.word2idx
+        }
 
     @property
     def vocab_size(self):
