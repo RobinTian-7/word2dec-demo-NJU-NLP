@@ -150,69 +150,43 @@ def main():
         device = resolve_device()
         print(f"Device: {device}")
 
-        stage_start = time.perf_counter()
         preprocessor = preprocess.Preprocessor(min_token_length=args.min_token_length)
         corpus = preprocessor.build_corpus_with_cache(args.data_path, args.cache_path)
-        if args.max_sentences and args.max_sentences > 0:
+        if args.max_sentences:
             corpus = corpus[: args.max_sentences]
-        print(f"Corpus ready in {time.perf_counter() - stage_start:.2f}s")
 
-        stage_start = time.perf_counter()
         vocabs = vocab.Vocabulary(min_count=args.min_count).build(corpus)
         word_freq = vocabs.word_freq()
         discard_probs = skipgram_utils.compute_discard_probabilities(word_freq, t=args.subsample_threshold)
-        print(f"Vocab ready in {time.perf_counter() - stage_start:.2f}s")
 
-        stage_start = time.perf_counter()
-        pair_count = skipgram_utils.count_training_pairs(
+        pairs = skipgram_utils.generate_training_pairs(
             corpus,
             vocabs.word2idx,
             window_size=args.window_size,
             discard_probs=discard_probs,
             rng=random.Random(args.seed),
         )
-        pairs = skipgram_utils.generate_training_pairs_array(
-            corpus,
-            vocabs.word2idx,
-            window_size=args.window_size,
-            discard_probs=discard_probs,
-            rng=random.Random(args.seed),
-            total_pairs=pair_count,
-        )
-        np.random.default_rng(args.seed).shuffle(pairs, axis=0)
-        print(f"Pairs ready in {time.perf_counter() - stage_start:.2f}s")
 
-        print(f"Sentences used: {len(corpus)}")
         print(f"Vocab size: {vocabs.vocab_size}")
-        print(f"Training pairs: {pair_count}")
+        print(f"Training pairs: {len(pairs)}")
 
         noise_table = build_noise_table(
             {idx: word_freq[vocabs.idx2word[idx]] for idx in range(vocabs.vocab_size)},
             table_size=args.table_size,
         )
 
-        effective_num_workers = args.num_workers
-        if effective_num_workers > 0 and mp.get_start_method() == "spawn":
-            print(
-                "num_workers>0 under spawn may duplicate the in-memory pair array and slow training; "
-                "falling back to num_workers=0."
-            )
-            effective_num_workers = 0
-
         dataset = PairsDataset(pairs, noise_table, neg_samples=args.neg_samples)
-        collator = NegativeSamplingCollator(noise_table, neg_samples=args.neg_samples)
         loader = DataLoader(
             dataset,
             batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=effective_num_workers,
-            collate_fn=collator,
+            shuffle=True,
+            num_workers=args.num_workers,
             pin_memory=(device.type == "cuda"),
-            persistent_workers=(effective_num_workers > 0),
+            persistent_workers=(args.num_workers > 0),
         )
 
         model = SkipGramNS(vocabs.vocab_size, args.embedding_dim).to(device)
-        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
+        optimizer = torch.optim.SparseAdam(model.parameters(), lr=args.lr)
 
         total_steps = args.epochs * len(loader)
         step = 0
@@ -233,7 +207,7 @@ def main():
                 neg = neg.to(device)
 
                 loss = model(center, pos, neg)
-                optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
@@ -262,7 +236,6 @@ def main():
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "neg_samples": args.neg_samples,
-            "num_workers": effective_num_workers,
             "loss_history": loss_history,
             "device": str(device),
         }
@@ -270,7 +243,6 @@ def main():
             json.dump(metadata, f, ensure_ascii=False, indent=2)
 
         print(f"Saved to {out.resolve()}")
-
 
 if __name__ == "__main__":
     main()
