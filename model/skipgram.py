@@ -48,6 +48,80 @@ def generate_training_pairs(corpus, word2idx, window_size=5, discard_probs=None,
     return pairs
 
 
+def count_training_pairs(corpus, word2idx, window_size=5, discard_probs=None, rng=None):
+    total_pairs = 0
+    rng = rng or random
+
+    for sentence in corpus:
+        filtered_sentence = []
+        for token in sentence:
+            if token not in word2idx:
+                continue
+
+            if discard_probs is not None and rng.random() < discard_probs.get(token, 0.0):
+                continue
+
+            filtered_sentence.append(word2idx[token])
+
+        for i, _ in enumerate(filtered_sentence):
+            dynamic_window = rng.randint(1, window_size)
+            start = max(0, i - dynamic_window)
+            end = min(len(filtered_sentence), i + dynamic_window + 1)
+            total_pairs += end - start - 1
+
+    return total_pairs
+
+
+def generate_training_pairs_array(
+    corpus,
+    word2idx,
+    window_size=5,
+    discard_probs=None,
+    rng=None,
+    total_pairs=None,
+):
+    rng = rng or random
+    if total_pairs is None:
+        total_pairs = count_training_pairs(
+            corpus,
+            word2idx,
+            window_size=window_size,
+            discard_probs=discard_probs,
+            rng=rng,
+        )
+
+    pairs = np.empty((total_pairs, 2), dtype=np.int32)
+    cursor = 0
+
+    for sentence in corpus:
+        filtered_sentence = []
+        for token in sentence:
+            if token not in word2idx:
+                continue
+
+            if discard_probs is not None and rng.random() < discard_probs.get(token, 0.0):
+                continue
+
+            filtered_sentence.append(word2idx[token])
+
+        for i, center_idx in enumerate(filtered_sentence):
+            dynamic_window = rng.randint(1, window_size)
+            start = max(0, i - dynamic_window)
+            end = min(len(filtered_sentence), i + dynamic_window + 1)
+
+            for j in range(start, end):
+                if j == i:
+                    continue
+                pairs[cursor, 0] = center_idx
+                pairs[cursor, 1] = filtered_sentence[j]
+                cursor += 1
+
+    if cursor != total_pairs:
+        raise ValueError(f"Expected {total_pairs} pairs, but generated {cursor}.")
+
+    return pairs
+
+
 class SkipGram:
     def __init__(self, vocab_size, embedding_dim):
         self.vocab_size = vocab_size
@@ -164,6 +238,7 @@ class SkipGramNegativeSampling:
 
         for epoch in range(epochs):
             total_loss = 0.0
+            epoch_step = 0
             for center_idx, context_idx in pairs:
                 current_lr = max(
                     initial_lr * (1 - current_step / total_steps),
@@ -191,8 +266,9 @@ class SkipGramNegativeSampling:
                 )
 
                 current_step += 1
+                epoch_step += 1
                 if report_every and current_step % report_every == 0:
-                    avg_loss = total_loss / current_step
+                    avg_loss = total_loss / epoch_step
                     print(
                         f"step={current_step}/{total_steps} "
                         f"lr={current_lr:.6f} avg_loss={avg_loss:.6f}"
