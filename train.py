@@ -176,11 +176,13 @@ def main():
         )
 
         dataset = PairsDataset(pairs, noise_table, neg_samples=args.neg_samples)
+        collator = NegativeSamplingCollator(noise_table, neg_samples=args.neg_samples)
         loader = DataLoader(
             dataset,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
+            collate_fn=collator,
             pin_memory=(device.type == "cuda"),
             persistent_workers=(args.num_workers > 0),
         )
